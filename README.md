@@ -12,3 +12,13 @@ ocproj my-project-name
 ocproj
 ```
 
+## Switch to openshift project
+```bash
+ecproj my-project-name
+```
+Output:
+```
+Now using project "my-project-name" on server "https://my-kubernetes-server:443".
+Active project is "my-project-name".
+```
+
