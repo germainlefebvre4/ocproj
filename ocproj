@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# ocproj(1) is a utility to switch between Kubernetes projects.
+
+# Copyright 2017 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[[ -n $DEBUG ]] && set -x
+
+set -eou pipefail
+IFS=$'\n\t'
+
+SELF_CMD="$0"
+
+KUBENS_DIR="${XDG_CACHE_HOME:-$HOME/.kube}/ocproj"
+
+usage() {
+  local SELF
+  SELF="ocproj"
+  if [[ "$(basename "$0")" == oc-* ]]; then # invoked as plugin
+    SELF="oc project"
+  fi
+
+  cat <<EOF
+USAGE:
+  $SELF                    : list the projects in the current context
+  $SELF <NAME>             : change the active project of current context
+  $SELF -                  : switch to the previous project in this context
+  $SELF -c, --current      : show the current project
+  $SELF -h,--help          : show this message
+EOF
+}
+
+exit_err() {
+   echo >&2 "${1}"
+   exit 1
+}
+
+current_project() {
+  local cur_ctx
+
+  cur_ctx="$(current_context)" || exit_err "error getting current context"
+  project="$($OC config view -o=jsonpath="{.contexts[?(@.name==\"${cur_ctx}\")].context.project}")" \
+     || exit_err "error getting current project"
+
+  if [[ -z "${project}" ]]; then
+    echo "default"
+  else
+    echo "${project}"
+  fi
+}
+
+current_context() {
+  $OC config current-context
+}
+
+get_projects() {
+  $OC get projects -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}'
+}
+
+escape_context_name() {
+  echo "${1//\//-}"
+}
+
+project_file() {
+  local ctx
+
+  ctx="$(escape_context_name "${1}")"
+  echo "${KUBENS_DIR}/${ctx}"
+}
+
+read_project() {
+  local f
+  f="$(project_file "${1}")"
+  [[ -f "${f}" ]] && cat "${f}"
+  return 0
+}
+
+save_project() {
+  mkdir -p "${KUBENS_DIR}"
+  local f saved
+  f="$(project_file "${1}")"
+  saved="$(read_project "${1}")"
+
+  if [[ "${saved}" != "${2}" ]]; then
+    printf %s "${2}" > "${f}"
+  fi
+}
+
+switch_project() {
+  local ctx="${1}"
+  $OC project "${2}"
+  echo "Active project is \"${2}\".">&2
+}
+
+choose_project_interactive() {
+  # directly calling ocproj via fzf might fail with a cryptic error like
+  # "$FZF_DEFAULT_COMMAND failed", so try to see if we can list projects
+  # locally first
+  if [[ -z "$(list_projects)" ]]; then
+    echo >&2 "error: could not list projects (is the cluster accessible?)"
+    exit 1
+  fi
+
+  local choice
+  choice="$(_KUBECTX_FORCE_COLOR=1 \
+    FZF_DEFAULT_COMMAND="${SELF_CMD}" \
+    fzf --ansi --no-preview || true)"
+  if [[ -z "${choice}" ]]; then
+    echo 2>&1 "error: you did not choose any of the options"
+    exit 1
+  else
+    set_project "${choice}"
+  fi
+}
+
+set_project() {
+  local ctx prev
+  ctx="$(current_context)" || exit_err "error getting current context"
+  prev="$(current_project)" || exit_error "error getting current project"
+
+  if grep -q ^"${1}"\$ <(get_projects); then
+    switch_project "${ctx}" "${1}"
+
+    if [[ "${prev}" != "${1}" ]]; then
+      save_project "${ctx}" "${prev}"
+    fi
+  else
+    echo "error: no project exists with name \"${1}\".">&2
+    exit 1
+  fi
+}
+
+list_projects() {
+  local yellow darkbg normal
+  yellow=$(tput setaf 3 || true)
+  darkbg=$(tput setab 0 || true)
+  normal=$(tput sgr0 || true)
+
+  local cur_ctx_fg cur_ctx_bg
+  cur_ctx_fg=${KUBECTX_CURRENT_FGCOLOR:-$yellow}
+  cur_ctx_bg=${KUBECTX_CURRENT_BGCOLOR:-$darkbg}
+
+  local cur project_list
+  cur="$(current_project)" || exit_err "error getting current project"
+  project_list=$(get_projects) || exit_err "error getting project list"
+
+  for c in $project_list; do
+  if [[ -n "${_KUBECTX_FORCE_COLOR:-}" || \
+       -t 1 && -z "${NO_COLOR:-}" ]]; then
+    # colored output mode
+    if [[ "${c}" = "${cur}" ]]; then
+      echo "${cur_ctx_bg}${cur_ctx_fg}${c}${normal}"
+    else
+      echo "${c}"
+    fi
+  else
+    echo "${c}"
+  fi
+  done
+}
+
+swap_project() {
+  local ctx project
+  ctx="$(current_context)" || exit_err "error getting current context"
+  project="$(read_project "${ctx}")"
+  if [[ -z "${project}" ]]; then
+    echo "error: No previous project found for current context." >&2
+    exit 1
+  fi
+  set_project "${project}"
+}
+
+main() {
+  if [[ -z "${OC:-}" ]]; then
+    if hash oc 2>/dev/null; then
+      OC=oc
+    elif hash oc.exe  2>/dev/null; then
+      OC=oc.exe
+    else
+      echo >&2 "oc is not installed"
+      exit 1
+    fi
+  fi
+
+  if [[ "$#" -eq 0 ]]; then
+    if [[ -t 1 && -z ${KUBECTX_IGNORE_FZF:-} && "$(type fzf &>/dev/null; echo $?)" -eq 0 ]]; then
+      choose_project_interactive
+    else
+      list_projects
+    fi
+  elif [[ "$#" -eq 1 ]]; then
+    if [[ "${1}" == '-h' || "${1}" == '--help' ]]; then
+      usage
+    elif [[ "${1}" == "-" ]]; then
+      swap_project
+    elif [[ "${1}" == '-c' || "${1}" == '--current' ]]; then
+      current_project
+    elif [[ "${1}" =~ ^-(.*) ]]; then
+      echo "error: unrecognized flag \"${1}\"" >&2
+      usage
+      exit 1
+    elif [[ "${1}" =~ (.+)=(.+) ]]; then
+      alias_context "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}"
+    else
+      set_project "${1}"
+    fi
+  else
+    echo "error: too many flags" >&2
+    usage
+    exit 1
+  fi
+}
+
+main "$@"
