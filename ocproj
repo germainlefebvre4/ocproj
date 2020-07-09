@@ -51,7 +51,7 @@ current_project() {
   local cur_ctx
 
   cur_ctx="$(current_context)" || exit_err "error getting current context"
-  project="$($OC config view -o=jsonpath="{.contexts[?(@.name==\"${cur_ctx}\")].context.project}")" \
+  project="$($OC config view -o=jsonpath="{.contexts[?(@.name==\"${cur_ctx}\")].context.namespace}")" \
      || exit_err "error getting current project"
 
   if [[ -z "${project}" ]]; then
